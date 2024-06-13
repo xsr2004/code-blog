@@ -38,6 +38,8 @@ TransactionTemplate#execute方法去执行需要事务的业务代码
 本篇文章通过一个电商业务中的例子，引出事务传播在业务中的解决方式。
 
 > [若要看知识点可以看](https://javaguide.cn/system-design/framework/spring/spring-knowledge-and-questions-summary.html#spring-%E4%BA%8B%E5%8A%A1%E4%B8%AD%E5%93%AA%E5%87%A0%E7%A7%8D%E4%BA%8B%E5%8A%A1%E4%BC%A0%E6%92%AD%E8%A1%8C%E4%B8%BA)
+>
+> ![图片](D:\picGo\images\640.webp)
 
 **事务传播行为是为了解决业务层方法之间互相调用的事务问题**
 
@@ -153,7 +155,7 @@ public void othersHandler(){
 
 
 
-## @transcational详解
+## @transcational基本用法
 
 **注解用法：用于类，方法(最普遍)，接口**
 
@@ -171,23 +173,93 @@ public void othersHandler(){
 
 ## @transcational原理实现(源码分析)
 
-事务执行的时序图如下
 
-![img](D:\picGo\images\webp.webp)
+
+主要就是俩方面
+
+**1.获取 该bean的切⾯⽅法**
+
+在bean初始化后处理器中，先查出所有的切面(advisor)信息( this.advisorRetrievalHelper.findAdvisorBeans)，匹配当前bean中有@transcational的方法（threadlocal设置当前要处理代理的bean，canApply的判断方式是看能不能获取到TransactionAttribute），并把事务属性写入attributeCache。
+
+这里先去看看advisor：
+
+> `Advisor`是 spring-aop 原创的组件，**一个 Advisor = 一个 Advice Filter + 一个 Advice**。
+>
+> 在 spring-aop 中，主要有两种`Advisor`：`IntroductionAdvisor`和`PointcutAdvisor`。前者为`ClassFilter`+`Advice`，后者为`Pointcut`+`Advice`。https://www.cnblogs.com/ZhangZiSheng001/p/13745168.html
+
+**2.创建aop代理对象：**
+
+createProxy（创建proxyFactory，填充刚获取到的该bean的切面方法Advisor和TargetSource，getProxy），然后选择jdk或者cglib，生成该类的代理对象
+
+
+
+![image.png](D:\picGo\images\c0e1839f5e5e46c8bfc4b697ee5683d4tplv-k3u1fbpfcp-zoom-in-crop-mark1512000.webp)
+
+
+
+当执行主体函数时，
+
+会被intercept||invoke拦截（看jdk/cglib），检验调用的方法修饰符(必须public)且有拦截器，调用TransactionInterceptor的invokeWithinTransaction方法
+
+在这个方法中创建事务（获取事务，从cache中获取事务属性，设置，开启），然后调用methodProxy.invoke去执行业务逻辑，并对出错进行回滚处理，最后清空transactionInfo值，若执行成功则commit事务
+
+下面是当调用@Transaction的方法时的处理：
+
+![img](D:\picGo\images\webp-17182683616644-17182683714806-17182683933408-171826846195810-171826876942412.webp)
+
+![image.png](D:\picGo\images\3f82db0be6a04aaeb9e8ba2323961834tplv-k3u1fbpfcp-zoom-in-crop-mark1512000.webp)
+
+总结：
+
+`@Transactional` 注解，是使用 AOP 实现的，本质就是在目标方法执行前后进行拦截。在目标方法执行前加入或创建一个事务，在执行方法执行后，根据实际情况选择提交或是回滚事务。
 
 
 
 ## @transcational使用时的注意点
 
 - `@Transactional` 只能应用到 public 方法才有效
+  - 从动态代理本身来说：jdk基于接口实现代理，接口肯定是public的；cglib基于类继承实现代理，如果不是public子类都无法重写，更别提代理
+  - 从源码角度：在匹配当前bean的@transcational方法的切面时，是通过看能否获取事务属性来判断的；而在获取事务属性时会先做校验，spring源码注释是// Don't allow non-public methods, as configured.。
 
 - Spring AOP 存在自调用问题
+  - 当方法被@transcational修饰后，其他类去调用这个方法时才会走代理对象的方法，通过invokeWithinTransaction方法来织入事务
+  - 为什么？
+    - 这是因为spring aop的工作原理是以类为代理对象的单位的，并非方法。
+  - 解决方式：
+    - 通过`AopContext.currentProxy()`获取当前类的代理对象，通过它来调用本类的@transcational方法
+    - 自注入，不太符合面向对象的[设计原则]
+    - 避免自调用的代码
 
 - 不建议处理长事务
+  - 若要用@transcational处理长事务则需要注意拆分和事务的生效
 - 多事务时要注意传播行为的正确设置
+  - 看是否结果被
 - 要注意回滚条件的正确设置
+  - 如果没正常回滚，很可能是catch异常被吞
+
+## spring 事务没有正常生效的原因
+
+- @transcational修饰了非public或者final，不管是jdk还是cglib代理模式，都不会生成代理对象。
+- @transcational注解的方法所在的类 没有被spring管理
+- 方法自调用
+- 事务没有正常开启和设置（springboot默认开启）
+- 异常被吞
+
+
+
+
 
 ## 长事务@Transactional
+
+危害：
+
+数据库连接池占满，容易死锁，回滚时间长....
+
+解决：
+
+编程式 ，手动管理事务的创建，关闭，commit，回滚逻辑等
+
+声明式，对事务进行颗粒度更小的拆分，将大事务分为各小事务，并且要**保证事务@Transcational的生效**。
 
 
 
@@ -209,6 +281,6 @@ https://github.com/TmTse/transaction-test
 
 https://juejin.cn/post/7208479235132244023#heading-0
 
-https://juejin.cn/post/7208479235132244023
-
 https://juejin.cn/post/6844903929554141197?searchId=202406121923581693CCC81782E373E7EB
+
+https://www.javadoop.com/
